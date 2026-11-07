@@ -1,0 +1,56 @@
+{
+  "$schema": "https://metrix.bar/dashboards/schema.json",
+  "schema_version": 1,
+  "id": "metrix-bar-dashboards",
+  "name": "Metrix.Bar 实用看板",
+  "dashboards": [
+    {
+      "id": "calendar",
+      "name": "日历",
+      "protocol_version": "0",
+      "version": "1.1.0",
+      "category": "productivity",
+      "placements": [
+        "menubar"
+      ],
+      "open_mode": "flyout",
+      "window_style": "standard",
+      "description": "在菜单栏查看今天的日期，打开月历浏览或选择日期。",
+      "file": "calendar.bar",
+      "sha256": "adeefc4930aa2e0ad809437b4b615c67a4273f225cc11aae475797d6eed18556"
+    },
+    {
+      "id": "local-ports",
+      "name": "本机端口",
+      "protocol_version": "0",
+      "version": "1.1.1",
+      "category": "developer-tools",
+      "placements": [
+        "menubar"
+      ],
+      "open_mode": "flyout",
+      "window_style": "standard",
+      "description": "搜索 macOS 上的 TCP 监听和 UDP 绑定，查看进程、PID 及监听范围。",
+      "docs": "仅支持 macOS。先在仓库目录运行 sh collect-local-ports.sh --watch，再打开看板。",
+      "file": "local-ports.bar",
+      "sha256": "6e8bdad4d9dac9e5b1051d05e01d21fcec3f9a874a2d403f6c7c6f9a12ae3283"
+    },
+    {
+      "id": "stock-board",
+      "name": "行情看板 (多市场)",
+      "protocol_version": "0",
+      "version": "1.1.2",
+      "category": "other",
+      "placements": [
+        "menubar"
+      ],
+      "open_mode": "flyout",
+      "window_style": "standard",
+      "description": "美股 / 港股 / A股 自选行情，批量刷新，点击查看分时和日 K",
+      "icon": "chart.bar.xaxis",
+      "docs": "查看美股、港股和 A 股的自选报价、分时走势和日 K。行情来自东方财富。\n\n一个标的时直接显示详情。多个标的按涨跌幅排序，点击任意标的查看分时和日 K，菜单栏跟随配置里的第一个标的。\n自选报价批量刷新，分时和日 K 按需加载。刷新时间指本机最后收到报价的时间，详情中的行情时间以数据源为准。\n\n标的写法：\n  105.AAPL      直接给市场号（105/106/107=美股，116=港股，1=沪，0=深/北）\n  US.AAPL       自动探测 NASDAQ / NYSE / AMEX\n  HK.00005      港股\n  SH.601398     沪市（SZ / BJ 同理）\n  IDX.HSI       指数，可用：SH SZ CYB HS300 KC50 HSI HSTECH DJIA NDX SPX\n  601398        裸代码按位数与前缀自动判断市场",
+      "file": "stock-board.bar",
+      "sha256": "6eda244178ae2a36a9ed09951d9b609ace0d0080b57d04a7ee413b71b555e3d5"
+    }
+  ]
+}

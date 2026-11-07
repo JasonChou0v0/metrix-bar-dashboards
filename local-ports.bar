@@ -1,0 +1,244 @@
+<bar protocol-version="0" id="local-ports" title="本机端口" version="1.1.1"
+     category="developer-tools" description="搜索 macOS 上的 TCP 监听和 UDP 绑定，查看进程、PID 及监听范围。"
+     placements="menubar" refresh="15s">
+  <permissions>
+    <file path="~/.local/state/metrix-bar/local-ports/snapshot.tsv" />
+  </permissions>
+  <docs>仅支持 macOS。先在仓库目录运行 sh collect-local-ports.sh --watch，再打开看板。</docs>
+  <script><![CDATA[
+    const snapshotPath = "~/.local/state/metrix-bar/local-ports/snapshot.tsv";
+    const scopes = {
+      all: { label: "全部", color: "text" },
+      loopback: { label: "仅本机", color: "textMuted" },
+      wildcard: { label: "所有接口", color: "text" },
+      specific: { label: "指定地址", color: "warning" },
+    };
+    const columnWidth = { pid: 58, ports: 154, scope: 94 };
+    const expanded = new Set();
+    let snapshot = null;
+    let readFailed = false;
+    let pendingRead = null;
+    let protocol = "TCP";
+    let scope = "all";
+    let query = "";
+
+    const node = (type, props, children = [], key) => ({ type, props, children, key });
+    const text = (value, props = {}, key) => node("Text", { text: value, ...props }, [], key);
+    const uniquePorts = rows => new Set(rows.map(row => row.port)).size;
+    const isLoopback = address => address === "::1" || /^127\./.test(address) || /^::ffff:127\./i.test(address);
+    const processKey = row => `process-${row.protocol}-${row.pid || row.owner}`;
+
+    function listeningScope(addresses) {
+      if (addresses.includes("0.0.0.0") || addresses.includes("::")) return "wildcard";
+      return addresses.every(isLoopback) ? "loopback" : "specific";
+    }
+
+    function parseSnapshot(source) {
+      const [stamp, ...lines] = source.trim().split("\n");
+      const time = Number(stamp) * 1000;
+      if (!Number.isFinite(time) || time <= 0) throw new Error("无效的快照时间");
+
+      // TCP、UDP 独立计数。同一进程同一端口的 IPv4 与 IPv6 地址并入同一行。
+      const ports = new Map();
+      for (const line of lines) {
+        const [transport, portText, address, owner, pid] = line.split("\t");
+        const port = Number(portText);
+        if (!/^(tcp|udp)[46]+$/.test(transport) || !Number.isInteger(port) || port < 1 || port > 65535 || !address || !owner) continue;
+        const protocol = transport.slice(0, 3).toUpperCase();
+        const key = `${protocol}-${port}-${pid || owner}`;
+        if (!ports.has(key)) ports.set(key, { key, protocol, port, owner, pid, addresses: new Set() });
+        const entry = ports.get(key);
+        if (address === "*") {
+          if (transport.includes("4")) entry.addresses.add("0.0.0.0");
+          if (transport.includes("6")) entry.addresses.add("::");
+        } else {
+          entry.addresses.add(address);
+        }
+      }
+      const rows = [...ports.values()].map(row => {
+        const addresses = [...row.addresses].sort();
+        const range = listeningScope(addresses);
+        return { ...row, range, addressText: addresses.join(" · ") };
+      }).sort((left, right) => left.port - right.port || left.owner.localeCompare(right.owner));
+      return { time, rows };
+    }
+
+    function loadSnapshot() {
+      if (pendingRead) return pendingRead;
+      pendingRead = $metrix.readFile(snapshotPath).then(source => {
+        const next = parseSnapshot(source);
+        if (!snapshot || readFailed) $metrix.log("本机端口：已读取本机快照", next.rows.length);
+        const activeProcesses = new Set(next.rows.map(processKey));
+        for (const key of expanded) {
+          if (!activeProcesses.has(key)) expanded.delete(key);
+        }
+        snapshot = next;
+        readFailed = false;
+      }).catch(() => {
+        if (!readFailed) $metrix.log("本机端口：无法读取快照，保留上次数据");
+        readFailed = true;
+      }).finally(() => { pendingRead = null; });
+      return pendingRead;
+    }
+
+    function button(key, value, onClick, style, color = "text") {
+      return node("ButtonBase", {
+        alignItems: "center", justify: "center", cursor: "pointer", radius: 8,
+        padding: [0, 8], hover: { background: "surfaceHover" }, pressed: { background: "surfacePressed" },
+        onClick, ...style,
+      }, [text(value, { fontSize: 11, fontWeight: 600, textColor: color, ignoreInput: true })], key);
+    }
+
+    function summary(count, processCount, updateText) {
+      const stat = (value, label, key) => node("Column", { alignItems: "end", gap: 2, minWidth: 59 }, [
+        text(value, { fontSize: 29, fontWeight: 700, fontFeatures: "tnum" }, key),
+        text(label, { fontSize: 10, fontWeight: 600 }),
+      ]);
+      return node("Row", {
+        alignItems: "center", gap: 14, padding: [11, 15], height: 76, shrink: 0,
+        background: "accentSubtle", radius: 14,
+      }, [
+        node("Column", { grow: 1, gap: 5 }, [
+          text("本机端口", { fontSize: 20, fontWeight: 700 }),
+          text(updateText, { fontSize: 11, fontWeight: 500, singleLine: true }, "snapshot-status"),
+        ]),
+        stat(processCount, "进程", "process-count"),
+        stat(count, protocol === "TCP" ? "TCP 监听" : "UDP 绑定", "port-count"),
+      ]);
+    }
+
+    function filters(rows) {
+      const scopeButtons = Object.entries(scopes).map(([key, { label }]) => {
+        const selected = scope === key;
+        const count = uniquePorts(key === "all" ? rows : rows.filter(row => row.range === key));
+        return button(`scope-${key}`, `${label} ${count}`, () => { scope = key; }, {
+          height: 28, grow: 1, basis: 0,
+          ...(selected ? { background: "accent", hover: { background: "accentHover" }, pressed: { background: "accentPressed" } }
+            : { background: "surface" }),
+        }, selected ? "accentText" : "text");
+      });
+      return [
+        node("Row", { alignItems: "center", gap: 8 }, [
+          node("Segmented", { items: ["TCP", "UDP"], value: protocol === "TCP" ? 0 : 1, width: 115,
+            onChange: index => { protocol = index === 1 ? "UDP" : "TCP"; scope = "all"; } }, [], "protocol"),
+          node("TextInput", { value: query, placeholder: "搜索端口、进程、PID 或地址", grow: 1,
+            onChange: value => { query = value; } }, [], "search"),
+        ]),
+        node("Row", { gap: 5 }, scopeButtons),
+      ];
+    }
+
+    function groupProcesses(rows) {
+      // 用 PID 分组，避免同名进程的端口被合并。只汇总命中当前筛选的端口。
+      const groups = new Map();
+      for (const row of rows) {
+        const key = processKey(row);
+        if (!groups.has(key)) groups.set(key, { key, owner: row.owner, pid: row.pid, ports: [] });
+        groups.get(key).ports.push(row);
+      }
+      return [...groups.values()];
+    }
+
+    function scopeBadge(range) {
+      const { label, color } = scopes[range] ?? { label: "范围混合", color: "text" };
+      return node("Row", {
+        padding: [3, 6], radius: 5, shrink: 0,
+        background: range === "loopback" ? "surfaceHover" : "accentSubtle",
+      }, [text(label, { textColor: color, fontSize: 10, fontWeight: 600 })]);
+    }
+
+    function portDetail(row) {
+      return node("Row", {
+        alignItems: "center", padding: [0, 7], gap: 9, minHeight: 28, radius: 6,
+        hover: { background: "surfaceHover" }, tooltip: row.addressText,
+      }, [
+        text(String(row.port), { width: 58, fontSize: 12, fontWeight: 700, fontFeatures: "tnum" }),
+        text(row.addressText, { grow: 1, shrink: 1, minWidth: 0, fontSize: 11, textColor: "textMuted", wrap: true },
+          `address-${row.key}`),
+        scopeBadge(row.range),
+      ], row.key);
+    }
+
+    function processRow(group) {
+      const open = expanded.has(group.key);
+      const numbers = group.ports.map(row => row.port);
+      const preview = `${numbers.slice(0, 3).join("、")}${numbers.length > 3 ? ` +${numbers.length - 3}` : ""}`;
+      const firstRange = group.ports[0].range;
+      const range = group.ports.every(row => row.range === firstRange) ? firstRange : "mixed";
+      const toggle = () => {
+        if (open) expanded.delete(group.key);
+        else expanded.add(group.key);
+        $metrix.log("本机端口：进程详情", group.pid || group.owner, open ? "折叠" : "展开");
+      };
+
+      return node("Column", { background: "surface", radius: 9 }, [
+        node("ButtonBase", {
+          height: 41, fillWidth: true, padding: [0, 10], radius: 9,
+          cursor: "pointer", tooltip: `${open ? "折叠" : "展开"} ${group.owner} · ${numbers.join("、")}`,
+          hover: { background: "surfaceHover" }, pressed: { background: "surfacePressed" }, onClick: toggle,
+        }, [node("Row", { gap: 9, alignItems: "center", fillWidth: true, ignoreInput: true }, [
+          text(group.pid || "—", { width: columnWidth.pid, fontSize: 11, textColor: "textMuted", fontFeatures: "tnum" }),
+          text(group.owner, { grow: 1, shrink: 1, minWidth: 0, fontSize: 12, fontWeight: 650, singleLine: true }),
+          text(preview, { width: columnWidth.ports, fontSize: 11, fontFeatures: "tnum", singleLine: true },
+            `ports-${group.key}`),
+          node("Row", { width: columnWidth.scope, alignItems: "center", justify: "spaceBetween" }, [
+            scopeBadge(range), text(open ? "⌄" : "›", { fontSize: 16, textColor: "textMuted" }),
+          ]),
+        ])], `toggle-${group.key}`),
+        ...(open ? [node("Column", { padding: [0, 10, 8], gap: 2 }, [
+          node("Divider", {}), ...group.ports.map(portDetail),
+        ], `details-${group.key}`)] : []),
+      ], group.key);
+    }
+
+    function renderList(rows) {
+      if (!rows.length) {
+        const message = !snapshot ? "等待本机端口快照" : "没有符合条件的端口";
+        return node("Column", { grow: 1, alignItems: "center", justify: "center" }, [
+          text(message, { fontSize: 13, textColor: "textMuted" }, "empty-state"),
+        ]);
+      }
+      return node("Scroll", { grow: 1, minHeight: 0, fillWidth: true }, [
+        node("Column", { gap: 5, fillWidth: true }, groupProcesses(rows).map(processRow)),
+      ], "port-list");
+    }
+
+    export default {
+      scheduled: loadSnapshot,
+      async event(name, event) {
+        if (name === "lifecycle" && event.type === "expand") await loadSnapshot();
+      },
+      render() {
+        const rows = snapshot?.rows ?? [];
+        const protocolRows = rows.filter(row => row.protocol === protocol);
+        const needle = query.trim().toLowerCase();
+        const filtered = protocolRows.filter(row => (scope === "all" || row.range === scope) &&
+          [row.port, row.owner, row.pid ?? "", row.addressText].some(value => String(value).toLowerCase().includes(needle)));
+        const stale = snapshot && Date.now() - snapshot.time > 60000;
+        const error = readFailed ? "无法读取采集快照" : stale ? "端口快照已超过 1 分钟未更新" : "";
+        const updated = snapshot ? `采集于 ${new Date(snapshot.time).toTimeString().slice(0, 8)}` : "等待采集";
+
+        return {
+          tray: { title: snapshot ? `端口 ${uniquePorts(rows.filter(row => row.protocol === "TCP"))}` : "端口 —", error },
+          panel: node("Column", { preferredWidth: 515, preferredHeight: 565, padding: 14, gap: 9, fill: true }, [
+            summary(snapshot ? String(uniquePorts(protocolRows)) : "—",
+              snapshot ? String(new Set(protocolRows.map(processKey)).size) : "—", error || updated),
+            ...filters(protocolRows),
+            node("Row", { alignItems: "center", padding: [3, 10, 0], gap: 9 }, [
+              text("PID", { width: columnWidth.pid, fontSize: 11, fontWeight: 600, textColor: "textMuted" }),
+              text("进程名", { grow: 1, fontSize: 11, fontWeight: 600, textColor: "textMuted" }),
+              text("端口列表", { width: columnWidth.ports, fontSize: 11, fontWeight: 600, textColor: "textMuted" }),
+              text("监听范围", { width: columnWidth.scope, fontSize: 11, fontWeight: 600, textColor: "textMuted" }),
+            ]),
+            renderList(filtered),
+            node("Divider", {}),
+            node("Row", { alignItems: "center", gap: 8 }, [
+              text("局域网是否可达，以其他设备实测为准。", { grow: 1, fontSize: 11, textColor: "textMuted" }),
+              button("refresh", "刷新", loadSnapshot, { height: 25, background: "surface" }),
+            ]),
+          ]),
+        };
+      },
+    };
+  ]]></script>
+</bar>

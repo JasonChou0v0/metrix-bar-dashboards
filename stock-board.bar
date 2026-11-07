@@ -1,0 +1,608 @@
+<bar protocol-version="0" id="stock-board" version="1.1.2" title="行情看板 (多市场)" icon="chart.bar.xaxis" refresh="15s" description="美股 / 港股 / A股 自选行情，批量刷新，点击查看分时和日 K">
+  <permissions>
+    <network origin="https://push2.eastmoney.com" />
+    <network origin="https://push2his.eastmoney.com" />
+  </permissions>
+
+  <inputs>
+    <input name="symbols" type="string" label="标的列表" default="105.AAPL,HK.00005,SH.601398" help="逗号分隔。支持 US.AAPL / HK.00005 / SH.601398 / SZ.000001 / BJ.920819 / IDX.HSI，也可直接写 105.AAPL 或裸代码" />
+    <input name="alertPct" type="string" label="提醒阈值(%)" default="3" help="涨跌幅绝对值达到阈值时显示标记，填 0 关闭。" />
+  </inputs>
+
+  <docs><![CDATA[
+查看美股、港股和 A 股的自选报价、分时走势和日 K。行情来自东方财富。
+
+一个标的时直接显示详情。多个标的按涨跌幅排序，点击任意标的查看分时和日 K，菜单栏跟随配置里的第一个标的。
+自选报价批量刷新，分时和日 K 按需加载。刷新时间指本机最后收到报价的时间，详情中的行情时间以数据源为准。
+
+标的写法：
+  105.AAPL      直接给市场号（105/106/107=美股，116=港股，1=沪，0=深/北）
+  US.AAPL       自动探测 NASDAQ / NYSE / AMEX
+  HK.00005      港股
+  SH.601398     沪市（SZ / BJ 同理）
+  IDX.HSI       指数，可用：SH SZ CYB HS300 KC50 HSI HSTECH DJIA NDX SPX
+  601398        裸代码按位数与前缀自动判断市场
+]]></docs>
+
+  <script><![CDATA[
+  // 中国市场习惯：涨红跌绿
+  const UP = "#ef4444";
+  const DOWN = "#10b981";
+  const FLAT = "#9ca3af";
+
+  const EM_LIST = "https://push2.eastmoney.com/api/qt/ulist.np/get";
+  const EM_SNAP = "https://push2.eastmoney.com/api/qt/stock/get";
+  const EM_TREND = "https://push2his.eastmoney.com/api/qt/stock/trends2/get";
+  const EM_KLINE = "https://push2his.eastmoney.com/api/qt/stock/kline/get";
+
+  // 指数：IDX.XXX -> secid
+  const INDEX = {
+    SH: "1.000001",
+    SZ: "0.399001",
+    CYB: "0.399006",
+    HS300: "1.000300",
+    KC50: "1.000688",
+    HSI: "100.HSI",
+    HSTECH: "124.HSTECH",
+    DJIA: "100.DJIA",
+    NDX: "100.NDX",
+    SPX: "100.SPX",
+  };
+
+  // 市场号 -> 展示标签
+  const MARKET_LABEL = { 105: "美股", 106: "美股", 107: "美股", 116: "港股", 1: "沪", 0: "深", 100: "指数", 124: "指数" };
+
+  // 东财把指数和股票混在同一个市场号里（上证指数 f13 也是 1），北交所又和深市共用 0，
+  // 所以标签不能只看 f13，要结合标的类型和代码前缀。
+  function marketTag(code, market, isIndex) {
+    const c = String(code || "");
+    if (isIndex || market === 100 || market === 124) return "指数";
+    if (market === 116) return "港股";
+    if (market === 105 || market === 106 || market === 107) return "美股";
+    if (market === 1) return "沪";
+    if (market === 0) return /^(92|83|87|43)/.test(c) ? "北" : "深";
+    return MARKET_LABEL[market] || "";
+  }
+
+  let items = [];
+  let rawSig = null;
+  let selected = null;
+  let configErrors = [];
+  let lastQuote = null;
+  let err = null;
+  let pendingQuotes = null;
+
+  const num = (v, d) => (v === null || v === undefined || v === "" || isNaN(v) ? "—" : Number(v).toFixed(d));
+  const signed = (v, d) => (v > 0 ? "+" : "") + num(v, d);
+  const tone = (v) => (v > 0 ? UP : v < 0 ? DOWN : FLAT);
+  const percent = v => Number.isFinite(v) ? signed(v, 2) + "%" : "—";
+  const overThreshold = (v, threshold) => Number.isFinite(v) && threshold > 0 && Math.abs(v) >= threshold;
+  const failure = e => e?.message || String(e);
+  // 报价展示：至少保留 2 位，超出的尾零去掉（美股 134.270 -> 134.27，港股 419.800 -> 419.80）
+  const quote = (v, dec) => {
+    const s = num(v, dec);
+    return dec > 2 ? s.replace(/(\.\d\d)0+$/, "$1") : s;
+  };
+
+  async function getJSON(url) {
+    const r = await fetch(url);
+    const body = await r.text();
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return JSON.parse(body);
+  }
+
+  function ymd(daysAgo) {
+    const d = new Date(Date.now() - daysAgo * 86400000);
+    return "" + d.getFullYear() + String(d.getMonth() + 1).padStart(2, "0") + String(d.getDate()).padStart(2, "0");
+  }
+
+  // 一个 token 展开成候选 secid 列表
+  function candidates(token) {
+    const t = String(token || "").trim().toUpperCase();
+    if (!t) return null;
+
+    // 已经是 secid：105.AAPL / 1.601398
+    if (/^\d+\.[A-Z0-9]+$/.test(t)) return { token: t, ids: [t] };
+
+    // 指数
+    if (t.indexOf("IDX.") === 0) {
+      const k = t.slice(4);
+      const id = INDEX[k];
+      if (!id) throw new Error("未知指数 " + k + "，可用 " + Object.keys(INDEX).join("/"));
+      return { token: t, ids: [id], isIndex: true };
+    }
+
+    const dot = t.indexOf(".");
+    if (dot > 0) {
+      const pre = t.slice(0, dot);
+      const code = t.slice(dot + 1);
+      if (pre === "SH") return { token: t, ids: ["1." + code] };
+      if (pre === "SZ") return { token: t, ids: ["0." + code] };
+      if (pre === "BJ") return { token: t, ids: ["0." + code] };
+      if (pre === "HK") return { token: t, ids: ["116." + code] };
+      if (pre === "US") return { token: t, ids: ["105." + code, "106." + code, "107." + code] };
+      throw new Error("未知市场前缀 " + pre + "（可用 US/HK/SH/SZ/BJ/IDX，或直接写市场号）");
+    }
+
+    // 裸代码：按位数与首位判断
+    if (/^\d{6}$/.test(t)) {
+      if (/^[69]/.test(t)) return { token: t, ids: ["1." + t] };   // 沪市主板/科创板
+      return { token: t, ids: ["0." + t] };                        // 深市 + 北交所
+    }
+    if (/^\d{5}$/.test(t)) return { token: t, ids: ["116." + t] }; // 港股
+    if (/^[A-Z][A-Z0-9]*$/.test(t)) return { token: t, ids: ["105." + t, "106." + t, "107." + t] };
+
+    throw new Error("无法识别的标的 " + token);
+  }
+
+  function sync(env) {
+    const raw = String(env.inputs.symbols || "").trim();
+    if (raw === rawSig) return;
+    rawSig = raw;
+    const parts = raw.split(/[,，\s]+/).filter(Boolean);
+    items = [];
+    selected = null;
+    configErrors = [];
+    lastQuote = null;
+    err = null;
+    const seen = new Set();
+    for (let i = 0; i < parts.length; i++) {
+      try {
+        const c = candidates(parts[i]);
+        if (!c || seen.has(c.token)) continue;
+        seen.add(c.token);
+        items.push({ ...c, resolved: null, row: null, miss: false, detail: null });
+      } catch (e) {
+        configErrors.push(failure(e));
+      }
+    }
+  }
+
+  // 单标的：逐个候选试，命中即停（顺手拿到全字段）
+  async function snapOne(cands) {
+    let error;
+    for (let i = 0; i < cands.length; i++) {
+      try {
+        const j = await getJSON(
+          EM_SNAP + "?secid=" + encodeURIComponent(cands[i]) +
+          "&fields=f43,f44,f45,f46,f47,f48,f57,f58,f59,f60,f86,f107,f162,f167,f168,f169,f170,f171"
+        );
+        if (j && j.data && typeof j.data.f43 === "number" && j.data.f43 > 0) return { id: cands[i], data: j.data };
+      } catch (e) {
+        error = e;
+      }
+    }
+    if (error) throw error;
+    return null;
+  }
+
+  function loadDetail(it, force = false) {
+    const detail = it.detail ??= { snap: null, trend: [], daily: [], quoteAt: null, chartAt: {}, chartErrors: {} };
+    if (detail.pending) return detail.pending;
+    const now = Date.now();
+    if (!force && detail.quoteAt !== null && now - detail.quoteAt < 15000) return;
+
+    // 每个标的独立缓存。分时和日 K 分开计时，失败时保留各自最后的可用图表。
+    detail.pending = (async () => {
+      try {
+        const hit = await snapOne(it.resolved ? [it.resolved] : it.ids);
+        if (!hit) throw new Error("暂时取不到 " + it.token + " 的报价");
+        it.resolved = hit.id;
+        detail.snap = hit.data;
+        detail.quoteAt = Date.now();
+        detail.error = null;
+      } catch (e) {
+        detail.error = failure(e);
+        $metrix.log("行情看板：详情报价获取失败", it.token, detail.error);
+        return;
+      }
+
+      const secid = encodeURIComponent(it.resolved);
+      const charts = [
+        ["trend", "分时", 55000, "trends", EM_TREND + "?secid=" + secid + "&fields1=f1,f2,f3,f4&fields2=f51,f53,f56&iscr=0&ndays=1"],
+        ["daily", "日 K", 550000, "klines", EM_KLINE + "?secid=" + secid +
+          "&klt=101&fqt=1&beg=" + ymd(120) + "&end=20500101&lmt=200&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56"],
+      ];
+      await Promise.all(charts.map(async ([key, label, interval, field, url]) => {
+        if (!force && detail.chartAt[key] != null && now - detail.chartAt[key] < interval) return;
+        detail.chartAt[key] = now;
+        try {
+          const j = await getJSON(url);
+          const rows = j?.data?.[field];
+          if (!Array.isArray(rows) || rows.length < 2) throw new Error("暂无足够数据");
+          detail[key] = rows;
+          delete detail.chartErrors[key];
+        } catch (e) {
+          detail.chartErrors[key] = `${label}${detail[key].length ? "未更新，显示上次结果" : "暂不可用"}`;
+          $metrix.log("行情看板：图表未更新", it.token, label, failure(e));
+        }
+      }));
+    })().finally(() => { detail.pending = null; });
+    return detail.pending;
+  }
+
+  async function loadQuotes(current) {
+    const ids = new Set(current.flatMap(it => it.resolved ? [it.resolved] : it.ids));
+    const j = await getJSON(EM_LIST + "?secids=" + [...ids].map(encodeURIComponent).join(",") +
+      "&fields=f2,f3,f4,f12,f13,f14,f15,f16,f17,f18&fltt=2");
+    const diff = j?.data?.diff;
+    const quotes = new Map(Object.values(diff ?? {}).filter(row => Number.isFinite(row?.f2))
+      .map(row => [`${row.f13}.${row.f12}`, row]));
+    let updated = 0;
+    for (const it of current) {
+      const resolved = it.ids.find(id => quotes.has(id));
+      it.miss = !resolved;
+      if (!resolved) continue;
+      it.resolved = resolved;
+      it.row = quotes.get(resolved);
+      updated++;
+    }
+    if (!updated) throw new Error("本次刷新未取得报价");
+    return Date.now();
+  }
+
+  async function refresh(env) {
+    sync(env);
+    const current = items;
+    if (!current.length) return;
+    if (current.length === 1) return loadDetail(current[0], env.reason === "manual");
+    if (pendingQuotes?.items === current) return pendingQuotes.task;
+    const task = loadQuotes(current).then(time => {
+      if (items !== current) return;
+      lastQuote = time;
+      err = null;
+    }).catch(e => {
+      if (items !== current) return;
+      err = failure(e);
+      $metrix.log("行情看板：自选报价刷新失败", err);
+    }).finally(() => {
+      if (pendingQuotes?.items === current) pendingQuotes = null;
+    });
+    pendingQuotes = { items: current, task };
+    await Promise.all([task, selected && loadDetail(selected, env.reason === "manual")]);
+  }
+
+  const caption = (text, key, color = "textMuted") => ({
+    type: "Text", key, props: { text, fontSize: 11, textColor: color, wrap: true },
+  });
+
+  const action = (text, key, onClick) => ({
+    type: "Button", key, props: { text, onClick, height: 26, fontSize: 11 },
+  });
+
+  const pad = value => String(value).padStart(2, "0");
+  const clockLabel = date => `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  const dateLabel = date => `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+
+  function chartSection(key, title, labels, props) {
+    // 原生分类轴会逐个绘制交易日。用独立的稀疏刻度保留日期和悬停详情。
+    return { type: "Column", key, props: { gap: 3, fillWidth: true }, children: [
+      { type: "Text", props: { text: title, fontSize: 11, fontWeight: 650 } },
+      { type: "Chart", props: { ...props, fillWidth: true, axes: { x: false, y: true } } },
+      { type: "Row", key: key + "-labels", props: { padding: [0, 5, 0, 22], justify: "spaceBetween" },
+        children: labels.map(text => ({ type: "Text", props: { text, textColor: "textMuted", fontSize: 10, singleLine: true, tw: "tabular-nums" } })) },
+    ] };
+  }
+
+  export default {
+    scheduled: refresh,
+
+    render(env) {
+      sync(env);
+      const value = Number(env.inputs.alertPct ?? "3");
+      const alertPct = Number.isFinite(value) ? Math.abs(value) : 3;
+      const reload = () => refresh({ ...env, reason: "manual" });
+      if (!items.length) {
+        const message = configErrors.join("；") || "请在设置中添加至少一个标的";
+        return {
+          tray: { title: "配置自选标的", error: message },
+          panel: {
+            type: "Column",
+            props: { padding: 14, gap: 8 },
+            children: [caption(message, "configuration", "warning"), caption("示例 105.AAPL,HK.00005,SH.601398,IDX.HSI")],
+          },
+        };
+      }
+
+      if (items.length === 1) return this.detail(items[0], alertPct, reload);
+      const list = this.list(alertPct, reload);
+      if (!selected) return list;
+      return { tray: list.tray, panel: this.detail(selected, alertPct, reload).panel };
+    },
+
+    detail(it, alertPct, reload) {
+      const tokenLabel = it.token.split(".").pop() || "—";
+      const { snap, trend = [], daily = [], error, chartErrors = {} } = it.detail ?? {};
+      const navigation = {
+        type: "Row", props: { gap: 8, alignItems: "center" }, children: [
+          ...(items.length > 1 ? [action("‹ 返回自选", "back", () => { selected = null; })] : []),
+          { type: "Spacer" }, action("刷新", "refresh", reload),
+        ],
+      };
+      if (!snap) {
+        return {
+          tray: { title: tokenLabel + (error ? " 取数失败" : " …"), error },
+          panel: { type: "Column", props: { preferredWidth: 365, padding: 14, gap: 8 }, children: [
+            navigation,
+            caption(it.row ? `${it.row.f14 || tokenLabel}  ${num(it.row.f2, 2)}  ${percent(it.row.f3)}` : tokenLabel),
+            caption(error ? "详情报价未更新 · " + error : "正在获取详情…", "detail-status", error ? "warning" : "textMuted"),
+          ] },
+        };
+      }
+
+      // 价格是整数，要除以 10^f59；涨跌幅 f170 是百分比的 100 倍
+      const dec = typeof snap.f59 === "number" ? snap.f59 : 2;
+      const scale = Math.pow(10, dec);
+      const px = (v) => (typeof v === "number" ? v / scale : null);
+
+      const price = px(snap.f43);
+      const prevClose = px(snap.f60);
+      const rate = Number.isFinite(snap.f170) ? snap.f170 / 100 : null;
+      const chg = px(snap.f169);
+      const color = tone(rate);
+      const name = snap.f58 || tokenLabel;
+      const quoteDate = new Date(snap.f86 * 1000);
+      const marketTime = Number.isFinite(snap.f86) && snap.f86 > 0 && Number.isFinite(quoteDate.getTime())
+        ? `${dateLabel(quoteDate)} ${clockLabel(quoteDate)}` : "";
+      // 指数代码没辨识度（IDX.SH 尾段是 SH），菜单栏直接用名称
+      const label = it.isIndex ? name : tokenLabel;
+      const hit = !error && overThreshold(rate, alertPct);
+
+      const tray = {
+        title: label + " " + quote(price, dec) + " " + percent(rate) + (hit ? " ‼" : ""),
+        tooltip: [name, marketTime, hit ? `达到 ${alertPct}% 阈值` : ""].filter(Boolean).join(" · "),
+        error: error || undefined,
+      };
+
+      // 分时："时间,价格,成交量"
+      const pts = [];
+      for (let i = 0; i < (trend || []).length; i++) {
+        const cols = String(trend[i]).split(",");
+        if (cols.length < 2) continue;
+        const p = parseFloat(cols[1]);
+        if (isNaN(p)) continue;
+        const ms = Date.parse(cols[0].replace(" ", "T"));
+        if (!Number.isFinite(ms)) continue;
+        pts.push({ x: ms, y: p, label: String(cols[0]).slice(11, 16), valueLabel: num(p, dec) });
+      }
+
+      const children = [];
+      if (error) children.push(caption("详情报价未更新，显示上次结果 · " + error, "detail-status", "warning"));
+
+      children.push({
+        type: "Row",
+        props: { gap: 10, alignItems: "end" },
+        children: [
+          {
+            type: "Column",
+            props: { gap: 2 },
+            children: [
+              { type: "Text", key: "detail-name", props: { text: name, fontSize: 15, bold: true } },
+              { type: "Text", props: { text: marketTag(snap.f57, snap.f107, it.isIndex) + " " + (it.resolved || it.token), fontSize: 10, textColor: "textMuted" } },
+            ],
+          },
+          { type: "Spacer" },
+          {
+            type: "Column",
+            props: { gap: 2, alignItems: "end" },
+            children: [
+              { type: "Text", props: { text: quote(price, dec), fontSize: 26, bold: true, textColor: color, tw: "tabular-nums" } },
+              { type: "Text", props: { text: (chg > 0 ? "+" : "") + quote(chg, dec) + "  " + percent(rate), fontSize: 12, textColor: color, tw: "tabular-nums" } },
+            ],
+          },
+        ],
+      });
+
+      if (pts.length > 1) {
+        const start = pts[0].x;
+        const end = pts[pts.length - 1].x;
+        const times = Array.from({ length: 5 }, (_, i) => clockLabel(new Date(start + (end - start) * i / 4)));
+        children.push(chartSection("intraday-chart", "分时", [...new Set(times)], {
+            type: "area",
+            height: 103,
+            xKind: "time",
+            curve: "monotone",
+            strokeWidth: 1.6,
+            dots: false,
+            grid: true,
+            gridStyle: "dashed",
+            yTicks: 3,
+            riseColor: UP,
+            fallColor: DOWN,
+            referenceLines: prevClose ? [{ value: prevClose, label: "昨收", color: "textMuted" }] : undefined,
+            theme: { colors: [color], riseColor: UP, fallColor: DOWN },
+            series: [{ name: label, color: color, fill: { from: 0.3, to: 0.02 }, points: pts }],
+        }));
+      }
+
+      const cell = (k, v) => ({
+        type: "Column",
+        props: { gap: 2 },
+        children: [
+          { type: "Text", props: { text: k, fontSize: 10, textColor: "textMuted" } },
+          { type: "Text", props: { text: v, fontSize: 12, tw: "tabular-nums" } },
+        ],
+      });
+
+      const hi = px(snap.f44);
+      const lo = px(snap.f45);
+      const amp = typeof snap.f171 === "number" ? snap.f171 / 100 : hi && lo && prevClose ? ((hi - lo) / prevClose) * 100 : null;
+
+      children.push({
+        type: "Row",
+        props: { gap: 14, padding: 6 },
+        children: [
+          cell("开", quote(px(snap.f46), dec)),
+          cell("高", quote(hi, dec)),
+          cell("低", quote(lo, dec)),
+          cell("昨收", quote(prevClose, dec)),
+          cell("振幅", Number.isFinite(amp) ? num(amp, 2) + "%" : "—"),
+        ],
+      });
+
+      // 第二行：成交与估值，有才显示
+      const vol = typeof snap.f47 === "number" ? snap.f47 : null;
+      const amt = typeof snap.f48 === "number" ? snap.f48 : null;
+      const extra = [];
+      if (vol) extra.push(cell("成交量", vol >= 1e8 ? num(vol / 1e8, 2) + "亿" : vol >= 1e4 ? num(vol / 1e4, 2) + "万" : String(vol)));
+      if (amt) extra.push(cell("成交额", amt >= 1e8 ? num(amt / 1e8, 2) + "亿" : num(amt / 1e4, 2) + "万"));
+      if (typeof snap.f168 === "number" && snap.f168 > 0) extra.push(cell("换手", num(snap.f168 / 100, 2) + "%"));
+      if (typeof snap.f162 === "number" && snap.f162 > 0) extra.push(cell("市盈率", num(snap.f162, 1)));
+      if (typeof snap.f167 === "number" && snap.f167 > 0) extra.push(cell("市净率", num(snap.f167, 2)));
+      if (extra.length) children.push({ type: "Row", props: { gap: 14, padding: [0, 6, 4, 6] }, children: extra });
+
+      // 日 K
+      const bars = [];
+      for (let i = 0; i < (daily || []).length; i++) {
+        const c = String(daily[i]).split(",");
+        if (c.length < 5) continue;
+        const o = parseFloat(c[1]), cl = parseFloat(c[2]), h = parseFloat(c[3]), l = parseFloat(c[4]);
+        if ([o, cl, h, l].some((v) => isNaN(v))) continue;
+        bars.push({ t: c[0], o, c: cl, h, l });
+      }
+      if (bars.length > 1) {
+        const count = Math.min(5, bars.length);
+        const dates = Array.from({ length: count }, (_, i) => bars[Math.round(i * (bars.length - 1) / (count - 1))].t.slice(5, 10));
+        children.push(chartSection("daily-chart", "日 K", dates, {
+            type: "candlestick",
+            height: 115,
+            xKind: "category",
+            yTicks: 3,
+            grid: true,
+            gridStyle: "dashed",
+            riseColor: UP,
+            fallColor: DOWN,
+            theme: { riseColor: UP, fallColor: DOWN },
+            candles: bars.map((b, i) => ({ x: i, open: b.o, high: b.h, low: b.l, close: b.c, label: b.t })),
+        }));
+      }
+
+      if (Object.keys(chartErrors).length) children.push(caption(Object.values(chartErrors).join(" · "), "chart-status", "warning"));
+      if (configErrors.length) children.push(caption(configErrors.join("；"), "configuration", "warning"));
+      if (marketTime) children.push(caption("行情时间（本机时区） " + marketTime, "market-time"));
+
+      return { tray, panel: {
+        type: "Column", props: { preferredWidth: 365, preferredHeight: 525, padding: 14, gap: 8, fill: true },
+        children: [navigation, { type: "Scroll", key: `detail-${it.token}`, props: { grow: 1, minHeight: 0, fillWidth: true },
+          children: [{ type: "Column", props: { gap: 10, fillWidth: true }, children }] }],
+      } };
+    },
+
+    list(alertPct, reload) {
+      // 按涨跌幅降序；取不到数据的沉底
+      const rows = items.slice().sort((a, b) => {
+        if (a.miss !== b.miss) return a.miss ? 1 : -1;
+        const ra = a.row && typeof a.row.f3 === "number" ? a.row.f3 : -9999;
+        const rb = b.row && typeof b.row.f3 === "number" ? b.row.f3 : -9999;
+        return rb - ra;
+      });
+
+      let up = 0, down = 0, flat = 0;
+      for (let i = 0; i < rows.length; i++) {
+        const r = rows[i].row;
+        if (!r || rows[i].miss || !Number.isFinite(r.f3)) continue;
+        if (r.f3 > 0) up++;
+        else if (r.f3 < 0) down++;
+        else flat++;
+      }
+
+      // 菜单栏跟着用户输入的第一个标的走，不随排序跳动
+      const head = items[0];
+      let tray;
+      if (head && head.row && typeof head.row.f2 === "number") {
+        const rr = head.row.f3;
+        const hit = !err && !head.miss && overThreshold(rr, alertPct);
+        const code = String(head.row.f12 || head.token).split(".").pop();
+        const disp = head.isIndex ? head.row.f14 || code : code;
+        tray = {
+          title: disp + " " + num(head.row.f2, 2) + " " + percent(rr) + (hit ? " ‼" : ""),
+          error: err || (head.miss ? "菜单栏标的报价未更新" : undefined),
+          tooltip:
+            rows.map(x => x.row ? `${x.row.f14 || x.token} ${num(x.row.f2, 2)} ${percent(x.row.f3)}${err || x.miss ? " · 上次报价" : ""}` : `${x.token} —`).join("\n") +
+            "\n涨 " + up + " / 跌 " + down + " / 平 " + flat,
+        };
+      } else {
+        tray = { title: err || head.miss ? "行情待更新" : "行情加载中…", error: err || (head.miss ? "菜单栏标的暂无报价" : undefined) };
+      }
+
+      const children = [];
+
+      children.push({
+        type: "Row",
+        props: { gap: 8, alignItems: "center", padding: [8, 10], background: "accentSubtle", radius: 10 },
+        children: [
+          { type: "Text", props: { text: "自选行情 · " + rows.length, fontSize: 14, bold: true } },
+          { type: "Spacer" },
+          { type: "Text", props: { text: "涨 " + up, fontSize: 11, textColor: UP, tw: "tabular-nums" } },
+          { type: "Text", props: { text: "跌 " + down, fontSize: 11, textColor: DOWN, tw: "tabular-nums" } },
+          ...(flat ? [caption("平 " + flat)] : []), action("刷新", "refresh", reload),
+        ],
+      });
+
+      const listRows = [];
+      for (let i = 0; i < rows.length; i++) {
+        const it = rows[i];
+        const r = it.row;
+        const name = (r && r.f14) || it.token;
+        const code = (r && r.f12) || it.token.split(".").pop();
+        const mkt = r ? marketTag(r.f12, r.f13, it.isIndex) : "";
+        const has = r && typeof r.f2 === "number";
+        const rate = has && typeof r.f3 === "number" ? r.f3 : null;
+        const hit = !err && !it.miss && overThreshold(rate, alertPct);
+        const status = has && (err || it.miss) ? " · 上次报价" : it.miss ? " · 暂无报价" : "";
+
+        listRows.push({
+          type: "ButtonBase", key: "quote-" + it.token,
+          props: { fillWidth: true, height: 44, padding: [7, 9], radius: 8, cursor: "pointer", background: "surface",
+            hover: { background: "surfaceHover" }, pressed: { background: "surfacePressed" },
+            onClick: async () => { selected = it; await loadDetail(it); } },
+          children: [{ type: "Row", props: { gap: 8, alignItems: "center", fillWidth: true, ignoreInput: true },
+          children: [
+            {
+              type: "Column",
+              props: { gap: 1 },
+              children: [
+                { type: "Text", props: { text: name, fontSize: 12, bold: true } },
+                { type: "Text", key: "symbol-" + it.token, props: { text: (mkt ? mkt + " " : "") + code + status, fontSize: 10, textColor: "textMuted" } },
+              ],
+            },
+            { type: "Spacer" },
+            {
+              type: "Column",
+              props: { gap: 1, alignItems: "end" },
+              children: [
+                { type: "Text", props: { text: has ? num(r.f2, 2) : "—", fontSize: 13, bold: true, textColor: rate === null ? FLAT : tone(rate), tw: "tabular-nums" } },
+                { type: "Text", props: { text: percent(rate) + (hit ? " ‼" : ""), fontSize: 11, textColor: rate === null ? FLAT : tone(rate), tw: "tabular-nums" } },
+              ],
+            },
+            { type: "Text", props: { text: "›", fontSize: 16, textColor: "textMuted" } },
+          ] }],
+        });
+      }
+
+      children.push({ type: "Scroll", key: "watchlist", props: { maxHeight: 350, fillWidth: true },
+        children: [{ type: "Column", props: { gap: 5, fillWidth: true }, children: listRows }] });
+      const misses = rows.filter(it => it.miss).length;
+      if (err) children.push(caption("批量报价刷新失败 · " + err, "quote-status", "warning"));
+      else if (misses) children.push(caption(`${misses} 个标的本次未更新`, "quote-status", "warning"));
+      if (configErrors.length) children.push(caption(configErrors.join("；"), "configuration", "warning"));
+
+      children.push({
+        type: "Text",
+        props: {
+          text: (lastQuote !== null ? "报价收到于 " + new Date(lastQuote).toTimeString().slice(0, 8) : "等待报价") + " · 点标的看详情",
+          fontSize: 10,
+          textColor: "textMuted",
+          wrap: true,
+        },
+      });
+
+      // 初次打开时按行数决定浮窗高度，长列表在上限内滚动。
+      const listHeight = Math.min(350, 49 * rows.length - 5);
+      const noticeHeight = (err || misses ? 25 : 0) + (configErrors.length ? 33 : 0);
+      return { tray, panel: { type: "Column", props: { preferredWidth: 365,
+        preferredHeight: 94 + listHeight + noticeHeight, padding: 12, gap: 7 }, children } };
+    },
+  };
+  ]]></script>
+</bar>

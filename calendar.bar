@@ -1,0 +1,131 @@
+<bar protocol-version="0" id="calendar" title="日历" version="1.1.0"
+     category="productivity" description="在菜单栏查看今天的日期，打开月历浏览或选择日期。"
+     placements="menubar" refresh="1m">
+  <script><![CDATA[
+    const weekdays = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"];
+    const weekHeadings = ["一", "二", "三", "四", "五", "六", "日"];
+    let selectedDate = null;
+    let browsedMonth = null;
+
+    const node = (type, props, children = [], key) => ({ type, props, children, key });
+    const label = (text, props = {}, key) => node("Text", { text, ...props }, [], key);
+    const twoDigits = value => String(value).padStart(2, "0");
+    const monthLabel = date => `${date.getFullYear()}年${date.getMonth() + 1}月`;
+
+    function dateKey(date) {
+      return `${date.getFullYear()}-${twoDigits(date.getMonth() + 1)}-${twoDigits(date.getDate())}`;
+    }
+
+    // 用本机时区的中午计算月份和跨月日期，避开午夜附近的时区变化。
+    function monthStart(date, offset = 0) {
+      return new Date(date.getFullYear(), date.getMonth() + offset, 1, 12);
+    }
+
+    function browseMonth(month, offset) {
+      browsedMonth = monthStart(month, offset);
+      $metrix.log("日历：已切换月份", monthLabel(browsedMonth));
+    }
+
+    function selectDate(date) {
+      selectedDate = date;
+      browsedMonth = monthStart(date);
+      $metrix.log("日历：已选择日期", dateKey(date));
+    }
+
+    function goToToday() {
+      selectedDate = null;
+      browsedMonth = null;
+      $metrix.log("日历：已回到今天");
+    }
+
+    function button(key, text, tooltip, onClick, props, textProps) {
+      return node("ButtonBase", {
+        alignItems: "center", justify: "center", cursor: "pointer",
+        padding: 0, radius: 8, tooltip, onClick,
+        hover: { background: "surfaceHover" },
+        pressed: { background: "surfacePressed" },
+        ...props,
+      }, [label(text, { ignoreInput: true, fontSize: 13, fontWeight: 600, ...textProps })], key);
+    }
+
+    function dateCard(date, isToday) {
+      return node("Row", {
+        alignItems: "center", gap: 12, padding: [10, 12], height: 74,
+        background: "accentSubtle", radius: 14, shrink: 0,
+      }, [
+        label(twoDigits(date.getDate()), {
+          width: 52, fontSize: 37, fontWeight: 650, fontFeatures: "tnum",
+        }),
+        node("Column", { grow: 1, gap: 3 }, [
+          label(`${isToday ? "今日" : "所选日期"} · ${weekdays[date.getDay()]}`,
+            { fontSize: 11, fontWeight: 500 }, "selected-weekday"),
+          label(`${monthLabel(date)}${date.getDate()}日`, {
+            fontSize: 12, fontWeight: 600, singleLine: true,
+          }, "selected-date"),
+        ]),
+        button("today", "今天", "回到今天", goToToday,
+          { width: 48, height: 28, background: "surface" }, { fontSize: 12 }),
+      ]);
+    }
+
+    function monthHeader(month) {
+      const arrowStyle = { width: 32, height: 30, background: "surface" };
+      return node("Row", { alignItems: "center", gap: 6 }, [
+        label(monthLabel(month), { grow: 1, fontSize: 17, fontWeight: 700 }, "visible-month"),
+        button("previous-month", "‹", "上个月", () => browseMonth(month, -1), arrowStyle, { fontSize: 20 }),
+        button("next-month", "›", "下个月", () => browseMonth(month, 1), arrowStyle, { fontSize: 20 }),
+      ]);
+    }
+
+    function monthGrid(month, today, selection) {
+      const todayKey = dateKey(today);
+      const selectedKey = dateKey(selection);
+      // 周一开列，固定六行；较短的月份也保留相同的面板高度。
+      const leadDays = (month.getDay() + 6) % 7;
+      const cell = { grow: 1, basis: 0 };
+      const heading = node("Row", { gap: 4, height: 20 }, weekHeadings.map((heading, index) =>
+        label(heading, { ...cell, textAlign: "center", fontSize: 11, fontWeight: 600,
+          textColor: index >= 5 ? "accent" : "textMuted" })));
+
+      const weeks = Array.from({ length: 6 }, (_, week) => node("Row", { gap: 4 },
+        Array.from({ length: 7 }, (_, day) => {
+          const date = new Date(month.getFullYear(), month.getMonth(), 1 - leadDays + week * 7 + day, 12);
+          const key = dateKey(date);
+          const isSelected = key === selectedKey;
+          const isToday = key === todayKey;
+          const inMonth = date.getMonth() === month.getMonth();
+          const title = `${monthLabel(date)}${date.getDate()}日 ${weekdays[date.getDay()]}${isToday ? "（今天）" : ""}`;
+          const style = { ...cell, height: 33 };
+          let color = inMonth ? "text" : "textMuted";
+          if (isSelected) {
+            color = "accentText";
+            Object.assign(style, {
+              background: "accent", hover: { background: "accentHover" }, pressed: { background: "accentPressed" },
+            });
+          } else if (isToday) {
+            color = "accent";
+            Object.assign(style, { borderWidth: 1, borderColor: "accent" });
+          }
+          return button(`day-${key}`, String(date.getDate()), title, () => selectDate(date), style,
+            { textColor: color, fontFeatures: "tnum", fontWeight: isSelected || isToday ? 700 : 500 });
+        })));
+      return node("Column", { gap: 4 }, [heading, ...weeks]);
+    }
+
+    export default {
+      render() {
+        const today = new Date();
+        const selection = selectedDate ?? today;
+        const month = browsedMonth ?? monthStart(selection);
+        return {
+          tray: { title: `${today.getMonth() + 1}月${today.getDate()}日` },
+          panel: node("Column", { preferredWidth: 324, preferredHeight: 390, padding: 14, gap: 10, fill: true }, [
+            dateCard(selection, dateKey(selection) === dateKey(today)),
+            monthHeader(month),
+            monthGrid(month, today, selection),
+          ]),
+        };
+      },
+    };
+  ]]></script>
+</bar>
