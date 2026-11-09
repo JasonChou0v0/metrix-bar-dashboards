@@ -8,6 +8,22 @@
 | 本机端口 | 在 macOS 上按进程查看 TCP 监听和 UDP 绑定，支持搜索及按监听范围筛选。 |
 | 行情看板 | 查看美股、港股和 A 股的自选报价、分时和日 K。行情来自东方财富。 |
 
+## 看板截图
+
+截图使用示例数据。
+
+### 日历
+
+<img src="calendar-preview.png" alt="日历看板的中文月历" width="324">
+
+### 本机端口
+
+<img src="local-ports-preview.png" alt="本机端口看板按进程展开监听详情" width="515">
+
+### 行情看板
+
+<img src="stock-board-preview.png" alt="行情看板的分时走势和日 K 详情" width="365">
+
 ## 安装
 
 在 Metrix.Bar 的「看板源」添加以下地址，刷新目录后安装所需看板。
