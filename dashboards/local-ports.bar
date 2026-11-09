@@ -1,10 +1,10 @@
-<bar protocol-version="0" id="local-ports" title="本机端口" version="1.1.1"
+<bar protocol-version="0" id="local-ports" title="本机端口" version="1.1.2"
      category="developer-tools" description="搜索 macOS 上的 TCP 监听和 UDP 绑定，查看进程、PID 及监听范围。"
      placements="menubar" refresh="15s">
   <permissions>
     <file path="~/.local/state/metrix-bar/local-ports/snapshot.tsv" />
   </permissions>
-  <docs>仅支持 macOS。先在仓库目录运行 sh collect-local-ports.sh --watch，再打开看板。</docs>
+  <docs>仅支持 macOS。先在仓库目录运行 sh support/local-ports/collect-local-ports.sh --watch，再打开看板。</docs>
   <script><![CDATA[
     const snapshotPath = "~/.local/state/metrix-bar/local-ports/snapshot.tsv";
     const scopes = {

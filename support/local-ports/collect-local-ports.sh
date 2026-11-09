@@ -5,7 +5,7 @@ umask 077
 mode=${1:-}
 case "$mode" in
   ''|--watch) ;;
-  *) printf '%s\n' '用法：sh collect-local-ports.sh [--watch]' >&2; exit 2 ;;
+  *) printf '用法：sh %s [--watch]\n' "$0" >&2; exit 2 ;;
 esac
 
 state_dir=${METRIX_PORTS_DIR:-"$HOME/.local/state/metrix-bar/local-ports"}

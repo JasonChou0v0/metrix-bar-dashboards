@@ -23,7 +23,7 @@
       "id": "local-ports",
       "name": "本机端口",
       "protocol_version": "0",
-      "version": "1.1.1",
+      "version": "1.1.2",
       "category": "developer-tools",
       "placements": [
         "menubar"
@@ -31,9 +31,9 @@
       "open_mode": "flyout",
       "window_style": "standard",
       "description": "搜索 macOS 上的 TCP 监听和 UDP 绑定，查看进程、PID 及监听范围。",
-      "docs": "仅支持 macOS。先在仓库目录运行 sh collect-local-ports.sh --watch，再打开看板。",
+      "docs": "仅支持 macOS。先在仓库目录运行 sh support/local-ports/collect-local-ports.sh --watch，再打开看板。",
       "file": "dashboards/local-ports.bar",
-      "sha256": "6e8bdad4d9dac9e5b1051d05e01d21fcec3f9a874a2d403f6c7c6f9a12ae3283"
+      "sha256": "05122ad285e46ff90f7f3124a70c752d710edf148629c303b1739cea5bedfdd7"
     },
     {
       "id": "stock-board",
