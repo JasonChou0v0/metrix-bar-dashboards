@@ -14,15 +14,15 @@
 
 ### 日历
 
-<img src="calendar-preview.png" alt="日历看板的中文月历" width="324">
+<img src="screenshots/calendar-preview.png" alt="日历看板的中文月历" width="324">
 
 ### 本机端口
 
-<img src="local-ports-preview.png" alt="本机端口看板按进程展开监听详情" width="515">
+<img src="screenshots/local-ports-preview.png" alt="本机端口看板按进程展开监听详情" width="515">
 
 ### 行情看板
 
-<img src="stock-board-preview.png" alt="行情看板的分时走势和日 K 详情" width="365">
+<img src="screenshots/stock-board-preview.png" alt="行情看板的分时走势和日 K 详情" width="365">
 
 ## 安装
 
@@ -46,4 +46,4 @@ sh collect-local-ports.sh --watch
 
 在看板输入参数中编辑「标的列表」，用逗号分隔。示例为 `US.AAPL,HK.00005,SH.601398`。点击列表中的标的即可查看图表。
 
-`index.json` 与看板文件放在同一目录。修改 `.bar` 后需更新其版本及索引中的 SHA-256 摘要。[Metrix.Bar 看板源文档](https://metrix.bar/zh/docs/registries)
+`index.json` 位于仓库根目录，`.bar` 文件放在 `dashboards/`，截图放在 `screenshots/`。修改 `.bar` 后需更新其版本及索引中的 SHA-256 摘要。[Metrix.Bar 看板源文档](https://metrix.bar/zh/docs/registries)
