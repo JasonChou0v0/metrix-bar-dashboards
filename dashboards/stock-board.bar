@@ -1,4 +1,4 @@
-<bar protocol-version="0" id="stock-board" version="1.1.2" title="行情看板 (多市场)" icon="chart.bar.xaxis" refresh="15s" description="美股 / 港股 / A股 自选行情，批量刷新，点击查看分时和日 K">
+<bar protocol-version="0" id="stock-board" version="1.2.0" widget="true" title="行情看板 (多市场)" icon="chart.bar.xaxis" refresh="15s" description="美股 / 港股 / A股 自选行情，批量刷新，点击查看分时和日 K">
   <permissions>
     <network origin="https://push2.eastmoney.com" />
     <network origin="https://push2his.eastmoney.com" />
@@ -228,6 +228,7 @@
     const diff = j?.data?.diff;
     const quotes = new Map(Object.values(diff ?? {}).filter(row => Number.isFinite(row?.f2))
       .map(row => [`${row.f13}.${row.f12}`, row]));
+    const receivedAt = Date.now();
     let updated = 0;
     for (const it of current) {
       const resolved = it.ids.find(id => quotes.has(id));
@@ -235,10 +236,11 @@
       if (!resolved) continue;
       it.resolved = resolved;
       it.row = quotes.get(resolved);
+      it.quoteAt = receivedAt;
       updated++;
     }
     if (!updated) throw new Error("本次刷新未取得报价");
-    return Date.now();
+    return receivedAt;
   }
 
   async function refresh(env) {
@@ -274,6 +276,62 @@
   const clockLabel = date => `${pad(date.getHours())}:${pad(date.getMinutes())}`;
   const dateLabel = date => `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 
+  function widgetQuote(item) {
+    // 单标的从详情缓存取报价，多标的从批量缓存取报价，两者共用现有刷新流程。
+    const snap = item.detail?.snap;
+    if (items.length === 1) {
+      const decimals = Number.isInteger(snap?.f59) ? snap.f59 : 2;
+      return {
+        price: Number.isFinite(snap?.f43) ? quote(snap.f43 / 10 ** decimals, decimals) : "—",
+        rate: Number.isFinite(snap?.f170) ? snap.f170 / 100 : null,
+        receivedAt: item.detail?.quoteAt,
+        stale: Boolean(item.detail?.error),
+      };
+    }
+    return {
+      price: num(item.row?.f2, 2), rate: item.row?.f3, receivedAt: item.quoteAt,
+      stale: Boolean(err || item.miss),
+    };
+  }
+
+  function stockWidget() {
+    const text = (text, props = {}) => ({ type: "Text", props: { text, maxLines: 1, ...props } });
+    const column = (gap, children) => ({ type: "Column", props: { gap }, children });
+    const heading = () => text("自选行情", { fontSize: 12, bold: true });
+    const hint = value => text(value, { fontSize: 10, color: "secondary" });
+    const change = (rate, fontSize) => text(percent(rate), { fontSize, bold: true,
+      color: rate > 0 ? UP : rate < 0 ? DOWN : "secondary" });
+    const receipt = time => time != null ? `报价收到于 ${clockLabel(new Date(time))}` : "等待报价";
+    const rows = items.slice(0, 3).map(item => ({ code: item.token.split(".").pop(), ...widgetQuote(item) }));
+    if (!rows.length) {
+      const empty = () => column(5, [heading(), hint("请添加自选标的")]);
+      return { small: empty(), medium: empty() };
+    }
+
+    const first = rows[0];
+    const firstStatus = first.stale ? (first.receivedAt != null ? "上次报价 · " + clockLabel(new Date(first.receivedAt)) : "暂无报价") : receipt(first.receivedAt);
+    const recent = lastQuote ?? first.receivedAt;
+    return {
+      small: column(4, [
+        text(first.code, { fontSize: 12, bold: true }),
+        text(first.price, { fontSize: 24, bold: true }),
+        change(first.rate, 13),
+        hint(firstStatus),
+      ]),
+      medium: column(4, [
+        heading(),
+        ...rows.map(row => ({ type: "Row", props: { gap: 5, alignItems: "center" }, children: [
+          text(row.code, { fontSize: 11, bold: true }),
+          ...(row.stale ? [hint(row.receivedAt != null ? "上次报价" : "暂无报价")] : []),
+          { type: "Spacer" },
+          text(row.price, { fontSize: 11, bold: true }),
+          change(row.rate, 11),
+        ] })),
+        hint(receipt(recent)),
+      ]),
+    };
+  }
+
   function chartSection(key, title, labels, props) {
     // 原生分类轴会逐个绘制交易日。用独立的稀疏刻度保留日期和悬停详情。
     return { type: "Column", key, props: { gap: 3, fillWidth: true }, children: [
@@ -292,10 +350,12 @@
       const value = Number(env.inputs.alertPct ?? "3");
       const alertPct = Number.isFinite(value) ? Math.abs(value) : 3;
       const reload = () => refresh({ ...env, reason: "manual" });
+      const widget = stockWidget();
       if (!items.length) {
         const message = configErrors.join("；") || "请在设置中添加至少一个标的";
         return {
           tray: { title: "配置自选标的", error: message },
+          widget,
           panel: {
             type: "Column",
             props: { padding: 14, gap: 8 },
@@ -304,10 +364,9 @@
         };
       }
 
-      if (items.length === 1) return this.detail(items[0], alertPct, reload);
+      if (items.length === 1) return { ...this.detail(items[0], alertPct, reload), widget };
       const list = this.list(alertPct, reload);
-      if (!selected) return list;
-      return { tray: list.tray, panel: this.detail(selected, alertPct, reload).panel };
+      return { ...list, panel: selected ? this.detail(selected, alertPct, reload).panel : list.panel, widget };
     },
 
     detail(it, alertPct, reload) {

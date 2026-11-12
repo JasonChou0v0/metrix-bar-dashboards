@@ -1,4 +1,4 @@
-<bar protocol-version="0" id="local-ports" title="本机端口" version="1.1.2"
+<bar protocol-version="0" id="local-ports" title="本机端口" version="1.2.0" widget="true"
      category="developer-tools" description="搜索 macOS 上的 TCP 监听和 UDP 绑定，查看进程、PID 及监听范围。"
      placements="menubar" refresh="15s">
   <permissions>
@@ -203,6 +203,31 @@
       ], "port-list");
     }
 
+    function portsWidget(tcpRows, status) {
+      // 桌面只展示 TCP 汇总，端口号、进程和地址仍可在面板中查看。
+      const count = range => snapshot ? String(uniquePorts(tcpRows.filter(row => row.range === range))) : "—";
+      const total = snapshot ? String(uniquePorts(tcpRows)) : "—";
+      const title = () => text("TCP 监听", { fontSize: 12, bold: true });
+      const updated = () => text(status, { fontSize: 10, color: "secondary", maxLines: 2 });
+      return {
+        small: node("Column", { gap: 4 }, [
+          title(),
+          text(total, { fontSize: 32, bold: true }),
+          text(`所有接口 ${count("wildcard")}`, { fontSize: 11, color: "accent" }),
+          updated(),
+        ]),
+        medium: node("Column", { gap: 6 }, [
+          title(),
+          node("Grid", { columns: 3, gap: 6 }, ["loopback", "wildcard", "specific"].map(range =>
+            node("Column", { gap: 3 }, [
+              text(count(range), { fontSize: 25, bold: true, color: range === "wildcard" ? "accent" : "primary" }),
+              text(scopes[range].label, { fontSize: 11, color: "secondary" }),
+            ]))),
+          updated(),
+        ]),
+      };
+    }
+
     export default {
       scheduled: loadSnapshot,
       async event(name, event) {
@@ -217,9 +242,12 @@
         const stale = snapshot && Date.now() - snapshot.time > 60000;
         const error = readFailed ? "无法读取采集快照" : stale ? "端口快照已超过 1 分钟未更新" : "";
         const updated = snapshot ? `采集于 ${new Date(snapshot.time).toTimeString().slice(0, 8)}` : "等待采集";
+        const tcpRows = rows.filter(row => row.protocol === "TCP");
+        const widgetStatus = snapshot && error ? `${stale ? "快照过期" : "读取失败"} · ${updated}` : error || updated;
 
         return {
-          tray: { title: snapshot ? `端口 ${uniquePorts(rows.filter(row => row.protocol === "TCP"))}` : "端口 —", error },
+          tray: { title: snapshot ? `端口 ${uniquePorts(tcpRows)}` : "端口 —", error },
+          widget: portsWidget(tcpRows, widgetStatus),
           panel: node("Column", { preferredWidth: 515, preferredHeight: 565, padding: 14, gap: 9, fill: true }, [
             summary(snapshot ? String(uniquePorts(protocolRows)) : "—",
               snapshot ? String(new Set(protocolRows.map(processKey)).size) : "—", error || updated),

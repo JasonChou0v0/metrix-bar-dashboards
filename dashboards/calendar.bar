@@ -1,4 +1,4 @@
-<bar protocol-version="0" id="calendar" title="日历" version="1.1.0"
+<bar protocol-version="0" id="calendar" title="日历" version="1.2.0" widget="true"
      category="productivity" description="在菜单栏查看今天的日期，打开月历浏览或选择日期。"
      placements="menubar" refresh="1m">
   <script><![CDATA[
@@ -11,6 +11,7 @@
     const label = (text, props = {}, key) => node("Text", { text, ...props }, [], key);
     const twoDigits = value => String(value).padStart(2, "0");
     const monthLabel = date => `${date.getFullYear()}年${date.getMonth() + 1}月`;
+    const leadingDays = month => (month.getDay() + 6) % 7;
 
     function dateKey(date) {
       return `${date.getFullYear()}-${twoDigits(date.getMonth() + 1)}-${twoDigits(date.getDate())}`;
@@ -81,7 +82,7 @@
       const todayKey = dateKey(today);
       const selectedKey = dateKey(selection);
       // 周一开列，固定六行；较短的月份也保留相同的面板高度。
-      const leadDays = (month.getDay() + 6) % 7;
+      const leadDays = leadingDays(month);
       const cell = { grow: 1, basis: 0 };
       const heading = node("Row", { gap: 4, height: 20 }, weekHeadings.map((heading, index) =>
         label(heading, { ...cell, textAlign: "center", fontSize: 11, fontWeight: 600,
@@ -112,6 +113,32 @@
       return node("Column", { gap: 4 }, [heading, ...weeks]);
     }
 
+    function calendarWidget(today) {
+      // 桌面月历使用本机当前日期，面板的翻月和选中状态不参与计算。
+      const month = monthStart(today);
+      const days = new Date(today.getFullYear(), today.getMonth() + 1, 0, 12).getDate();
+      const cell = (value, isToday = false, heading = false) => label(value, {
+        fontSize: 10, textAlign: "center", bold: isToday || heading,
+        color: isToday ? "accent" : heading ? "secondary" : "primary",
+      });
+      const grid = [
+        ...weekHeadings.map(day => cell(day, false, true)),
+        ...Array.from({ length: leadingDays(month) }, () => cell(" ")),
+        ...Array.from({ length: days }, (_, i) => cell(String(i + 1), i + 1 === today.getDate())),
+      ];
+      return {
+        small: node("Column", { gap: 3 }, [
+          label(monthLabel(today), { fontSize: 12, color: "secondary" }),
+          label(String(today.getDate()), { fontSize: 42, bold: true, color: "accent" }),
+          label(weekdays[today.getDay()], { fontSize: 14, bold: true }),
+        ]),
+        medium: node("Column", { gap: 4 }, [
+          label(monthLabel(today), { fontSize: 14, bold: true }),
+          node("Grid", { columns: 7, gap: 1 }, grid),
+        ]),
+      };
+    }
+
     export default {
       render() {
         const today = new Date();
@@ -119,6 +146,7 @@
         const month = browsedMonth ?? monthStart(selection);
         return {
           tray: { title: `${today.getMonth() + 1}月${today.getDate()}日` },
+          widget: calendarWidget(today),
           panel: node("Column", { preferredWidth: 324, preferredHeight: 390, padding: 14, gap: 10, fill: true }, [
             dateCard(selection, dateKey(selection) === dateKey(today)),
             monthHeader(month),
